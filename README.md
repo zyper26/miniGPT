@@ -133,3 +133,4 @@ output = W(x) + x @ A @ B
 | `heads` | 8 |
 | `batch` | 2 |
 | `seq` | 10 |
+# miniGPT
