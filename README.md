@@ -20,6 +20,13 @@ The goal is to understand the internals by writing every component by hand — n
 | `PositionalEncoding` | Sinusoidal position encoding added to token embeddings |
 | `MiniGPT` | Full decoder-only model: embedding → PE → N blocks → logit projection |
 
+### KV Cache (`cache_multihead_attention.py`)
+
+| Component | Description |
+|---|---|
+| `CachedMultiHeadAttention` | MHA with KV cache; prefill stores full K/V, each decode step appends one token's K/V and attends over growing cache |
+| `clear_cache` | Resets stored K/V tensors between sequences |
+
 ### Fine-tuning (`finetuning_lora.py`)
 
 | Component | Description |
@@ -33,12 +40,13 @@ The goal is to understand the internals by writing every component by hand — n
 ## Files
 
 ```
-transformer_components.py   # Full model in PyTorch — MiniGPT + all building blocks
-train.py                    # Training script — cross-entropy loss, Adam optimizer
-finetuning_lora.py          # LoRA and QLoRA implementations with shape/gradient tests
-transformer_components.rs   # Inference-only Rust impl using ndarray
-transformer_components.ts   # Inference-only TypeScript impl (zero dependencies)
-practice_sample.ipynb       # Notebook for experimentation
+transformer_components.py       # Full model in PyTorch — MiniGPT + all building blocks
+train.py                        # Training script — cross-entropy loss, Adam optimizer
+finetuning_lora.py              # LoRA and QLoRA implementations with shape/gradient tests
+cache_multihead_attention.py    # MHA with KV cache — prefill + autoregressive decode demo
+transformer_components.rs       # Inference-only Rust impl using ndarray
+transformer_components.ts       # Inference-only TypeScript impl (zero dependencies)
+practice_sample.ipynb           # Notebook for experimentation
 ```
 
 ---
@@ -57,6 +65,12 @@ python train.py                     # 10-epoch training run
 
 ```bash
 python finetuning_lora.py   # runs 7 tests: shapes, zero-init, grad flow, rank sweep
+```
+
+### Python — KV Cache
+
+```bash
+python cache_multihead_attention.py   # prefill + 3 decode steps + memory estimate
 ```
 
 ### Rust
@@ -107,6 +121,19 @@ output = W(x) + x @ A @ B
 
 **QLoRA** stores `W` in `float16` (4× memory saving over full precision) while keeping the adapters in `bfloat16`. Quantization error in the frozen weights is acceptable since only the adapters update during training.
 
+### KV Cache
+
+During autoregressive generation, the model produces one token at a time. Without caching, every new token recomputes K and V for all prior positions — O(n) work per step, O(n²) total.
+
+KV caching stores K and V after the **prefill** (processing the full prompt) and appends only the new token's K/V at each **decode** step:
+
+```
+Prefill (use_cache=False):  x(batch, seq, d)  → K/V cached, full attention over seq tokens
+Decode  (use_cache=True):   x(batch,   1, d)  → new K/V appended, attention over (seq+t) tokens
+```
+
+Memory cost scales as `2 × layers × batch × heads × (seq + decode_steps) × d_k × dtype_bytes`. At `seq=10, 3 decode steps, 32 layers, float16` the cache is ~0.05 MB — grows linearly with context length.
+
 ---
 
 ## Default hyperparameters
@@ -133,4 +160,15 @@ output = W(x) + x @ A @ B
 | `heads` | 8 |
 | `batch` | 2 |
 | `seq` | 10 |
+
+### cache_multihead_attention.py
+
+| Param | Value |
+|---|---|
+| `d_model` | 256 |
+| `heads` | 4 |
+| `batch` | 1 |
+| `seq` (prefill) | 10 |
+| decode steps | 3 |
+| layers (memory est.) | 32 |
 # miniGPT
