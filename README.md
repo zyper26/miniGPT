@@ -35,6 +35,22 @@ The goal is to understand the internals by writing every component by hand — n
 | `QLoRALinear` | Same as LoRA but `W` stored in `float16`, adapters in `bfloat16` |
 | `LoRAMultiHeadAttention` | MHA with LoRA applied to `W_q` and `W_v`; `W_k` and `W_o` remain frozen |
 
+### Quantization (`quantization_scaling.py`)
+
+| Component | Description |
+|---|---|
+| `quantize` | Maps float32 weights to int8 using min/max scaling; returns quantized tensor and scale factor |
+| `dequantize` | Recovers approximate float values by multiplying int8 weights by the scale factor |
+| `quantization_error` | Measures mean absolute error between original and dequantized weights |
+
+### Speculative Decoding (`speculative_decoding.py`)
+
+| Component | Description |
+|---|---|
+| `get_next_token_probs` | Runs a model logits function and returns a softmax probability distribution over vocab |
+| `sample_token` | Samples a single token from a probability distribution via multinomial sampling |
+| `speculative_decode` | Drafts `n_draft` tokens with a small model, verifies with the large target model using rejection sampling; guarantees output distribution matches the target model exactly |
+
 ---
 
 ## Files
@@ -44,6 +60,8 @@ transformer_components.py       # Full model in PyTorch — MiniGPT + all buildi
 train.py                        # Training script — cross-entropy loss, Adam optimizer
 finetuning_lora.py              # LoRA and QLoRA implementations with shape/gradient tests
 cache_multihead_attention.py    # MHA with KV cache — prefill + autoregressive decode demo
+quantization_scaling.py         # Int8 quantization with min/max scaling — 7 tests
+speculative_decoding.py         # Speculative decoding with rejection sampling — 5 tests
 transformer_components.rs       # Inference-only Rust impl using ndarray
 transformer_components.ts       # Inference-only TypeScript impl (zero dependencies)
 practice_sample.ipynb           # Notebook for experimentation
@@ -71,6 +89,18 @@ python finetuning_lora.py   # runs 7 tests: shapes, zero-init, grad flow, rank s
 
 ```bash
 python cache_multihead_attention.py   # prefill + 3 decode steps + memory estimate
+```
+
+### Python — Quantization
+
+```bash
+python quantization_scaling.py   # 7 tests: dtype, range, scale, error, memory, dequant, layer sim
+```
+
+### Python — Speculative Decoding
+
+```bash
+python speculative_decoding.py   # 5 tests: output length, acceptance rate, disagreement, growth, free token
 ```
 
 ### Rust
@@ -134,6 +164,31 @@ Decode  (use_cache=True):   x(batch,   1, d)  → new K/V appended, attention ov
 
 Memory cost scales as `2 × layers × batch × heads × (seq + decode_steps) × d_k × dtype_bytes`. At `seq=10, 3 decode steps, 32 layers, float16` the cache is ~0.05 MB — grows linearly with context length.
 
+### Quantization
+
+INT8 quantization maps each float32 weight to an 8-bit integer using a linear scale derived from the weight's min and max:
+
+```
+scale          = (max(W) - min(W)) / 255
+W_quantized    = round(W / scale).clamp(-128, 127)   # int8
+W_dequantized  = W_quantized * scale                  # approx float32
+```
+
+This gives a **4× memory reduction** (float32 → int8) with a small, bounded quantization error (typically < 0.02 mean absolute error on normally distributed weights). The scale factor must be stored alongside the quantized weights for dequantization.
+
+### Speculative Decoding
+
+Speculative decoding speeds up large model inference without any quality loss. A small draft model proposes `n_draft` tokens cheaply; the large target model verifies all of them in a single forward pass using rejection sampling:
+
+```
+Accept draft token x  if:  rand(0, 1) < min(1, p_target(x) / p_draft(x))
+```
+
+- `p_target ≥ p_draft` → always accept (target model agrees or is more confident)
+- `p_target < p_draft` → accept with probability = ratio (draft was overconfident)
+
+If all `n_draft` tokens are accepted, a bonus token is sampled from the target model for free. This guarantees the output distribution exactly matches the large model (**lossless**). Practical speedup is ~3–4× on predictable text with a well-matched draft model.
+
 ---
 
 ## Default hyperparameters
@@ -171,4 +226,22 @@ Memory cost scales as `2 × layers × batch × heads × (seq + decode_steps) × 
 | `seq` (prefill) | 10 |
 | decode steps | 3 |
 | layers (memory est.) | 32 |
+
+### quantization_scaling.py
+
+| Param | Value |
+|---|---|
+| `n_bits` | 8 |
+| test weight shape | up to 1024×1024 |
+| simulated `d_model` | 512 |
+| simulated layers | W_q, W_k, W_v, W_o |
+
+### speculative_decoding.py
+
+| Param | Value |
+|---|---|
+| `vocab_size` | 100 |
+| `n_draft` | 4 |
+| `max_new_tokens` | 8–20 |
+| `temperature` | 1.0 |
 # miniGPT
